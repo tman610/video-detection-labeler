@@ -5,6 +5,7 @@ from video_view import VideoView
 from video_controller import VideoController
 
 def main():
+    # Create the application
     app = QApplication(sys.argv)
     
     # Create MVC components
@@ -15,8 +16,13 @@ def main():
     # Show the view
     view.show()
     
-    # Start the application
-    sys.exit(app.exec())
+    # Run the application
+    exit_code = app.exec()
+    
+    # Clean up resources
+    model.cleanup()
+    
+    return exit_code
 
 if __name__ == "__main__":
-    main() 
+    sys.exit(main()) 
