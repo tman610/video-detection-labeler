@@ -27,6 +27,10 @@ class VideoController:
         self.model.current_frame_index_changed.connect(self._on_current_frame_changed)
         self.model.playback_state_changed.connect(self._on_playback_state_changed)
         self.model.fps_changed.connect(self.view.update_fps)
+        self.model.rectangles_changed.connect(self.view.video_display.set_rectangles)
+        
+        # Connect rectangle drawing signal
+        self.view.video_display.rectangle_drawn.connect(self._on_rectangle_drawn)
     
     def open_video(self):
         """Handle opening a new video file"""
@@ -77,4 +81,16 @@ class VideoController:
     def _on_slider_released(self):
         """Handle slider release (clicking)"""
         value = self.view.seek_slider.value()
-        self.model.seek(value) 
+        self.model.seek(value)
+        
+    def _on_rectangle_drawn(self, x1, y1, x2, y2):
+        """Handle rectangle drawn signal"""
+        # Save the rectangle to the database
+        if self.model.video_id is not None:
+            self.model.db.save_rectangle(
+                self.model.video_id,
+                self.model.current_frame_index,
+                x1, y1, x2, y2
+            )
+            self.model.add_rectangle(x1, y1, x2, y2) 
+            print(f"Rectangle saved to database for video {self.model.video_id}, frame {self.model.current_frame_index}") 

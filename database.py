@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import datetime
 
 class Database:
     def __init__(self, db_path="videos.db"):
@@ -13,6 +14,7 @@ class Database:
     def _connect(self):
         """Connect to the SQLite database"""
         self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
     
     def _create_tables(self):
@@ -26,6 +28,22 @@ class Database:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS rectangles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id INTEGER NOT NULL,
+            frame_index INTEGER NOT NULL,
+            x1 INTEGER NOT NULL,
+            y1 INTEGER NOT NULL,
+            x2 INTEGER NOT NULL,
+            y2 INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (video_id) REFERENCES videos (id),
+            UNIQUE (video_id, frame_index, x1, y1, x2, y2)
+        )
+        ''')
+        
         self.conn.commit()
     
     def get_video_by_name(self, name):
@@ -73,6 +91,48 @@ class Database:
         else:
             # Video doesn't exist, insert it
             return self.insert_video(name_str, fps, frame_count)
+    
+    def save_rectangle(self, video_id, frame_index, x1, y1, x2, y2):
+        """Save a rectangle to the database"""
+        try:
+            # Ensure parameters are of the correct type
+            video_id_int = int(video_id)
+            frame_index_int = int(frame_index)
+            x1_int = int(x1)
+            y1_int = int(y1)
+            x2_int = int(x2)
+            y2_int = int(y2)
+            
+            self.cursor.execute(
+                "INSERT INTO rectangles (video_id, frame_index, x1, y1, x2, y2) VALUES (?, ?, ?, ?, ?, ?)",
+                (video_id_int, frame_index_int, x1_int, y1_int, x2_int, y2_int)
+            )
+            self.conn.commit()
+            return self.cursor.lastrowid
+        except (ValueError, TypeError) as e:
+            print(f"Error saving rectangle: {e}")
+            return None
+    
+    
+    def get_all_rectangles_for_video(self, video_id):
+        """Get all rectangles for a video"""
+        try:
+            # Ensure video_id is of the correct type
+            video_id = int(video_id)
+            
+            self.cursor.execute(
+                """
+                SELECT id, frame_index, x1, y1, x2, y2, created_at
+                FROM rectangles
+                WHERE video_id = ?
+                ORDER BY frame_index
+                """,
+                (video_id,)
+            )
+            return self.cursor.fetchall()
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+            return []
     
     def close(self):
         """Close the database connection"""

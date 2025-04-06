@@ -11,6 +11,7 @@ class VideoModel(QObject):
     current_frame_index_changed = Signal(int)  # Emits the current frame index
     playback_state_changed = Signal(bool)  # Emits the playing state
     fps_changed = Signal(float)  # Emits the current FPS
+    rectangles_changed = Signal(list)  # Emits the list of rectangles for the current frame
     
     def __init__(self):
         super().__init__()
@@ -26,6 +27,9 @@ class VideoModel(QObject):
         self.video_id = None
         self.video_name = None
         self.db = Database()
+        
+        # Dictionary to store rectangles for each frame
+        self.rectangles = {}  # frame_index -> list of rectangles
     
     def load_video(self, file_path):
         """Load a video file and initialize the model"""
@@ -77,6 +81,12 @@ class VideoModel(QObject):
             self.frame_count_changed.emit(self.frame_count)
             self.fps_changed.emit(fps)
             
+            # Clear rectangles for the new video
+            self.rectangles = {}
+            
+            # Load rectangles from the database for this video
+            self._load_rectangles_from_db()
+            
             # Get the first frame to store its PTS
             self.frame_generator = self.container.decode(video=0)
             try:
@@ -88,12 +98,40 @@ class VideoModel(QObject):
                 self.current_frame = first_frame
                 self.frame_changed.emit(self.current_frame)
                 self.current_frame_index_changed.emit(self.current_frame_index)
+                
+                # Emit rectangles for the first frame
+                self._emit_rectangles_for_current_frame()
             except StopIteration:
                 self.reset_to_start()
                 
         except Exception as e:
             print(f"Error loading video: {e}")
             self.cleanup()
+    
+    def _load_rectangles_from_db(self):
+        """Load rectangles from the database for the current video"""
+        if self.video_id is None:
+            return
+            
+        try:
+            # Get all rectangles for this video from the database
+            db_rectangles = self.db.get_all_rectangles_for_video(self.video_id)
+            
+            # Organize rectangles by frame index
+            for rect in db_rectangles:
+                frame_index = rect[1]  # frame_index is the second element
+                x1, y1, x2, y2 = rect[2:6]  # x1, y1, x2, y2 are elements 2-5
+                
+                # Initialize the list for this frame if it doesn't exist
+                if frame_index not in self.rectangles:
+                    self.rectangles[frame_index] = []
+                
+                # Add the rectangle to the list
+                self.rectangles[frame_index].append((x1, y1, x2, y2))
+            
+            print(f"Loaded {len(db_rectangles)} rectangles from database for video {self.video_id}")
+        except Exception as e:
+            print(f"Error loading rectangles from database: {e}")
     
     def _load_frame(self):
         """Load the current frame"""
@@ -104,11 +142,48 @@ class VideoModel(QObject):
             self.current_frame = next(self.frame_generator)
             self.frame_changed.emit(self.current_frame)
             self.current_frame_index_changed.emit(self.current_frame_index)
+            
+            # Emit rectangles for the current frame
+            self._emit_rectangles_for_current_frame()
         except StopIteration:
             if self.is_playing:
                 self.is_playing = False
                 self.playback_state_changed.emit(False)
             self.reset_to_start()
+    
+    def _emit_rectangles_for_current_frame(self):
+        """Emit rectangles for the current frame"""
+        rectangles = self.rectangles.get(self.current_frame_index, [])
+        self.rectangles_changed.emit(rectangles)
+    
+    def add_rectangle(self, x1, y1, x2, y2):
+        """Add a rectangle to the current frame"""
+        # Create a new rectangle
+        rectangle = (x1, y1, x2, y2)
+        
+        # Initialize the list for this frame if it doesn't exist
+        if self.current_frame_index not in self.rectangles:
+            self.rectangles[self.current_frame_index] = []
+        
+        # Add the rectangle to the list
+        self.rectangles[self.current_frame_index].append(rectangle)
+        
+        # Save the rectangle to the database
+        if self.video_id is not None:
+            try:
+                self.db.save_rectangle(
+                    self.video_id,
+                    self.current_frame_index,
+                    x1, y1, x2, y2
+                )
+                print(f"Rectangle saved to database for video {self.video_id}, frame {self.current_frame_index}")
+            except Exception as e:
+                print(f"Error saving rectangle to database: {e}")
+        
+        # Emit the updated rectangles
+        self._emit_rectangles_for_current_frame()
+        
+        print(f"Rectangle added to frame {self.current_frame_index}: {rectangle}")
     
     def reset_to_start(self):
         """Reset to the first frame"""
@@ -152,6 +227,9 @@ class VideoModel(QObject):
             self.current_frame_index = frame_index
             self.frame_changed.emit(self.current_frame)
             self.current_frame_index_changed.emit(self.current_frame_index)
+            
+            # Emit rectangles for the current frame
+            self._emit_rectangles_for_current_frame()
         else:
             # If we couldn't find the frame, reset to start
             self.reset_to_start()
@@ -195,6 +273,7 @@ class VideoModel(QObject):
             self.is_playing = False
             self.video_id = None
             self.video_name = None
+            self.rectangles = {}  # Clear rectangles
         
         # Close database connection
         if self.db:

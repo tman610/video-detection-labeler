@@ -1,12 +1,15 @@
-from PySide6.QtWidgets import QGraphicsView, QGraphicsScene
+from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsView, QGraphicsScene, QGraphicsItem
 from PySide6.QtCore import Qt, QRectF, Signal, QPoint
-from PySide6.QtGui import QImage, QPixmap, QPainter
+from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QBrush
 
 class VideoDisplay(QGraphicsView):
     """A QGraphicsView-based widget for displaying video frames"""
     
     # Signal to emit cursor position
     cursor_position_changed = Signal(int, int)
+    
+    # Signal to emit when a rectangle is drawn
+    rectangle_drawn = Signal(int, int, int, int)  # x1, y1, x2, y2
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -31,8 +34,17 @@ class VideoDisplay(QGraphicsView):
         self.image_item = None
         self.zoom_factor = 1.0
         
+        # Rectangle drawing variables
+        self.drawing_rectangle = False
+        self.start_point = None
+        self.current_rect = None
+        self.rectangles = []  # List to store rectangles for current frame
+        
         # Set up the background
         self.setBackgroundBrush(Qt.black)
+        
+        # Enable rubber band selection for zooming
+        self.setDragMode(QGraphicsView.RubberBandDrag)
     
     def display_frame(self, frame):
         """Display a frame in the view"""
@@ -79,6 +91,90 @@ class VideoDisplay(QGraphicsView):
             # Restore the previous transform
             self.setTransform(current_transform)
             self.zoom_factor = current_zoom
+        
+        # Redraw all rectangles
+        self._draw_rectangles()
+    
+    def mousePressEvent(self, event):
+        """Handle mouse press events for rectangle drawing"""
+        if event.button() == Qt.LeftButton:
+            # Get the position in scene coordinates
+            scene_pos = self.mapToScene(event.pos())
+            
+            # Check if we're within the image bounds
+            if self.image_item and self.image_item.boundingRect().contains(scene_pos):
+                self.drawing_rectangle = True
+                self.start_point = scene_pos
+                self.current_rect = self.scene.addRect(
+                    QRectF(self.start_point, self.start_point),
+                    QPen(QColor(255, 0, 0), 2),
+                    QBrush(Qt.NoBrush)
+                )
+                self.current_rect.setZValue(1)
+        
+        super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        """Handle mouse move events for rectangle drawing and cursor tracking"""
+        super().mouseMoveEvent(event)
+        
+        # Get the position in scene coordinates
+        scene_pos = self.mapToScene(event.pos())
+        
+        # Handle rectangle drawing
+        if self.drawing_rectangle and self.current_rect:
+            # Update the rectangle
+            self.current_rect.setRect(QRectF(self.start_point, scene_pos))
+        
+        # Handle cursor position tracking
+        if self.image_item:
+            # Get the image rect
+            image_rect = self.image_item.boundingRect()
+            
+            # Check if the cursor is within the image bounds
+            if image_rect.contains(scene_pos):
+                # Calculate the position relative to the image
+                x = int(scene_pos.x() - image_rect.left())
+                y = int(scene_pos.y() - image_rect.top())
+                
+                # Emit the position
+                self.cursor_position_changed.emit(x, y)
+            else:
+                # Cursor is outside the image
+                self.cursor_position_changed.emit(-1, -1)
+        else:
+            # No image loaded
+            self.cursor_position_changed.emit(-1, -1)
+    
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release events for rectangle drawing"""
+        if event.button() == Qt.LeftButton and self.drawing_rectangle:
+            # Get the end position in scene coordinates
+            end_pos = self.mapToScene(event.pos())
+            
+            # Get the image rect
+            image_rect = self.image_item.boundingRect()
+            
+            # Check if both points are within the image bounds
+            if (image_rect.contains(self.start_point) and 
+                image_rect.contains(end_pos)):
+                
+                # Calculate the rectangle coordinates relative to the image
+                x1 = int(min(self.start_point.x(), end_pos.x()) - image_rect.left())
+                y1 = int(min(self.start_point.y(), end_pos.y()) - image_rect.top())
+                x2 = int(max(self.start_point.x(), end_pos.x()) - image_rect.left())
+                y2 = int(max(self.start_point.y(), end_pos.y()) - image_rect.top())
+                
+                # Print the rectangle coordinates (for debugging)
+                print(f"Rectangle drawn: ({x1}, {y1}) to ({x2}, {y2})")
+                
+                # Emit the rectangle coordinates
+                self.rectangle_drawn.emit(x1, y1, x2, y2)
+            
+            # Clean up
+            self.drawing_rectangle = False
+            self.start_point = None
+            self.current_rect = None
     
     def wheelEvent(self, event):
         """Handle mouse wheel events for zooming"""
@@ -86,7 +182,7 @@ class VideoDisplay(QGraphicsView):
         old_pos = self.mapToScene(event.position().toPoint())
         
         # Calculate zoom factor
-        zoom_in_factor = 1.15
+        zoom_in_factor = 1.25
         zoom_out_factor = 1 / zoom_in_factor
         
         # Apply zoom
@@ -116,31 +212,25 @@ class VideoDisplay(QGraphicsView):
         
         # If there's an image, fit it to the view
         if self.image_item:
-            self.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            self.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio) 
     
-    def mouseMoveEvent(self, event):
-        """Handle mouse move events to track cursor position"""
-        super().mouseMoveEvent(event)
-        
-        # Get the position in scene coordinates
-        scene_pos = self.mapToScene(event.pos())
-        
-        # Convert to image coordinates
-        if self.image_item:
-            # Get the image rect
-            image_rect = self.image_item.boundingRect()
-            
-            # Check if the cursor is within the image bounds
-            if image_rect.contains(scene_pos):
-                # Calculate the position relative to the image
-                x = int(scene_pos.x() - image_rect.left())
-                y = int(scene_pos.y() - image_rect.top())
+    def set_rectangles(self, rectangles):
+        """Set the rectangles to display for the current frame"""
+        self.rectangles = rectangles
+        self._draw_rectangles()
+    
+    def _draw_rectangles(self):
+        """Draw all rectangles for the current frame"""
+        # Remove existing rectangles
+        for item in self.scene.items():
+            if isinstance(item, QGraphicsRectItem):
+                self.scene.removeItem(item)
                 
-                # Emit the position
-                self.cursor_position_changed.emit(x, y)
-            else:
-                # Cursor is outside the image
-                self.cursor_position_changed.emit(-1, -1)
-        else:
-            # No image loaded
-            self.cursor_position_changed.emit(-1, -1) 
+        # Draw new rectangles
+        for rect in self.rectangles:
+            x1, y1, x2, y2 = rect
+            self.scene.addRect(
+                QRectF(x1, y1, x2 - x1, y2 - y1),
+                QPen(QColor(255, 0, 0), 2),
+                QBrush(Qt.NoBrush)
+            ).setZValue(1) 
