@@ -32,8 +32,10 @@ class VideoView(QMainWindow):
         
         # Create the top row with open button and FPS label
         self.top_row = QHBoxLayout()
+        self.cursor_pos_label = QLabel("(0, 0)")
         self.open_button = QPushButton("Open Video")
         self.fps_label = QLabel("FPS: 0")
+        self.top_row.addWidget(self.cursor_pos_label)
         self.top_row.addWidget(self.open_button)
         self.top_row.addStretch()
         self.top_row.addWidget(self.fps_label)
@@ -85,6 +87,9 @@ class VideoView(QMainWindow):
         
         # Set up keyboard shortcuts
         self._setup_shortcuts()
+        
+        # Connect the cursor position signal
+        self.video_display.cursor_position_changed.connect(self.update_cursor_position)
     
     def _setup_shortcuts(self):
         """Set up keyboard shortcuts for video navigation"""
@@ -134,4 +139,9 @@ class VideoView(QMainWindow):
     
     def update_fps(self, fps):
         """Update the FPS label"""
-        self.fps_label.setText(f"FPS: {fps:.2f}") 
+        self.fps_label.setText(f"FPS: {fps:.2f}")
+    
+    def update_cursor_position(self, x, y):
+        """Update the cursor position label"""
+        if x >= 0 and y >= 0:
+            self.cursor_pos_label.setText(f"({x}, {y})") 

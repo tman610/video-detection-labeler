@@ -1,9 +1,12 @@
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene
-from PySide6.QtCore import Qt, QRectF, Signal
+from PySide6.QtCore import Qt, QRectF, Signal, QPoint
 from PySide6.QtGui import QImage, QPixmap, QPainter
 
 class VideoDisplay(QGraphicsView):
     """A QGraphicsView-based widget for displaying video frames"""
+    
+    # Signal to emit cursor position
+    cursor_position_changed = Signal(int, int)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -19,6 +22,9 @@ class VideoDisplay(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        
+        # Enable mouse tracking
+        self.setMouseTracking(True)
         
         # Initialize variables
         self.current_image = None
@@ -110,4 +116,31 @@ class VideoDisplay(QGraphicsView):
         
         # If there's an image, fit it to the view
         if self.image_item:
-            self.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio) 
+            self.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+    
+    def mouseMoveEvent(self, event):
+        """Handle mouse move events to track cursor position"""
+        super().mouseMoveEvent(event)
+        
+        # Get the position in scene coordinates
+        scene_pos = self.mapToScene(event.pos())
+        
+        # Convert to image coordinates
+        if self.image_item:
+            # Get the image rect
+            image_rect = self.image_item.boundingRect()
+            
+            # Check if the cursor is within the image bounds
+            if image_rect.contains(scene_pos):
+                # Calculate the position relative to the image
+                x = int(scene_pos.x() - image_rect.left())
+                y = int(scene_pos.y() - image_rect.top())
+                
+                # Emit the position
+                self.cursor_position_changed.emit(x, y)
+            else:
+                # Cursor is outside the image
+                self.cursor_position_changed.emit(-1, -1)
+        else:
+            # No image loaded
+            self.cursor_position_changed.emit(-1, -1) 
