@@ -21,6 +21,9 @@ class VideoController:
         self.view.seek_slider.sliderMoved.connect(self._on_slider_moved)
         self.view.seek_slider.sliderReleased.connect(self._on_slider_released)
         
+        # Connect speed dropdown signal
+        self.view.speed_dropdown.currentIndexChanged.connect(self._on_speed_changed)
+        
         # Connect model signals
         self.model.frame_changed.connect(self.view.display_frame)
         self.model.frame_count_changed.connect(self._on_frame_count_changed)
@@ -42,17 +45,31 @@ class VideoController:
         """Handle play/pause button click"""
         is_playing = self.model.toggle_playback()
         if is_playing:
-            frame_rate = self.model.get_frame_rate()
-            if frame_rate > 0:
-                self.timer.start(1000 // frame_rate)
-                self.last_frame_time = time.time()
+            self._start_playback_timer()
         else:
             self.timer.stop()
+    
+    def _start_playback_timer(self):
+        """Start the playback timer with the current speed"""
+        frame_rate = self.model.get_frame_rate()
+        if frame_rate > 0:
+            # Get the speed multiplier from the view
+            speed = self.view.get_speed_multiplier()
+            # Calculate the timer interval based on frame rate and speed
+            interval = int(1000 / (frame_rate * speed))
+            self.timer.start(interval)
+            self.last_frame_time = time.time()
+    
+    def _on_speed_changed(self, index):
+        """Handle speed dropdown changes"""
+        if self.model.is_playing:
+            self._start_playback_timer()
     
     def _on_timer_timeout(self):
         """Handle timer timeout for frame advancement"""
         current_time = time.time()
-        frame_duration = 1.0 / self.model.get_frame_rate()
+        speed = self.view.get_speed_multiplier()
+        frame_duration = 1.0 / (self.model.get_frame_rate() * speed)
         
         # Check if it's time for the next frame
         if current_time - self.last_frame_time >= frame_duration:

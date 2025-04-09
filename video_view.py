@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QPushButton, QLabel, QSlider, QFileDialog, QFormLayout
+    QPushButton, QLabel, QSlider, QFileDialog, QFormLayout,
+    QComboBox
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QShortcut, QKeySequence
@@ -30,15 +31,21 @@ class VideoView(QMainWindow):
         self.control_panel = QWidget()
         self.control_layout = QVBoxLayout(self.control_panel)
         
-        # Create the top row with open button and FPS label
+        # Create the top row with open button, FPS label, and speed dropdown
         self.top_row = QHBoxLayout()
         self.cursor_pos_label = QLabel("(0, 0)")
         self.open_button = QPushButton("Open Video")
         self.fps_label = QLabel("FPS: 0")
+        
+        # Create speed dropdown
+        self.speed_dropdown = QComboBox()
+        self.speed_dropdown.addItems(["1x", "2x", "3x", "4x", "5x", "10x"])
+        
         self.top_row.addWidget(self.cursor_pos_label)
         self.top_row.addWidget(self.open_button)
         self.top_row.addStretch()
         self.top_row.addWidget(self.fps_label)
+        self.top_row.addWidget(self.speed_dropdown)
         self.control_layout.addLayout(self.top_row)
         
         # Create the frame controls
@@ -144,4 +151,9 @@ class VideoView(QMainWindow):
     def update_cursor_position(self, x, y):
         """Update the cursor position label"""
         if x >= 0 and y >= 0:
-            self.cursor_pos_label.setText(f"({x}, {y})") 
+            self.cursor_pos_label.setText(f"({x}, {y})")
+    
+    def get_speed_multiplier(self):
+        """Get the current speed multiplier from the dropdown"""
+        text = self.speed_dropdown.currentText()
+        return float(text.rstrip('x')) 
