@@ -2,12 +2,106 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QPushButton, QLabel, QSlider, QFileDialog, QFormLayout,
     QComboBox, QListWidget, QListWidgetItem, QLineEdit, QMessageBox,
-    QInputDialog
+    QInputDialog, QTextEdit, QDialog, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QShortcut, QKeySequence
+from PySide6.QtGui import QImage, QShortcut, QKeySequence, QTextCursor
 from video_display import VideoDisplay
+import sys
+import logging
 
+# --- Training Log Dialog --- 
+class TrainingLogDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Training Log")
+        self.setMinimumSize(600, 400)
+        
+        layout = QVBoxLayout(self)
+        self.log_text_edit = QTextEdit(self)
+        self.log_text_edit.setReadOnly(True)
+        layout.addWidget(self.log_text_edit)
+        
+        # Add stop button
+        self.stop_button = QPushButton("Stop Training")
+        self.stop_button.setEnabled(False)  # Initially disabled
+        layout.addWidget(self.stop_button)
+        
+        # Make it non-modal so the main window can still be used
+        self.setModal(False)
+        
+        # Store original stdout and stderr
+        self.original_stdout = sys.stdout
+        self.original_stderr = sys.stderr
+        
+        # Create our custom stream
+        self.log_stream = LogStream(self)
+        
+        # Set up logging to capture all output
+        self.setup_logging()
+
+    def setup_logging(self):
+        """Set up logging to capture all output"""
+        # Configure root logger
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+        
+        # Create a handler that writes to our log stream
+        self.log_handler = logging.StreamHandler(self.log_stream)
+        self.log_handler.setLevel(logging.INFO)
+        
+        # Add the handler to the root logger
+        root_logger.addHandler(self.log_handler)
+        
+        # Redirect stdout and stderr
+        sys.stdout = self.log_stream
+        sys.stderr = self.log_stream
+
+    def restore_logging(self):
+        """Restore original logging configuration"""
+        # Remove our handler from the root logger
+        root_logger = logging.getLogger()
+        root_logger.removeHandler(self.log_handler)
+        
+        # Restore original stdout and stderr
+        sys.stdout = self.original_stdout
+        sys.stderr = self.original_stderr
+
+    def showEvent(self, event):
+        """Called when the dialog is shown"""
+        super().showEvent(event)
+        self.setup_logging()
+
+    def closeEvent(self, event):
+        """Called when the dialog is closed"""
+        self.restore_logging()
+        super().closeEvent(event)
+
+    def append_text(self, text):
+        """Appends text to the log and scrolls to the bottom."""
+        self.log_text_edit.moveCursor(QTextCursor.End)
+        self.log_text_edit.insertPlainText(text)
+        self.log_text_edit.moveCursor(QTextCursor.End)
+    
+    def clear_text(self):
+        self.log_text_edit.clear()
+
+class LogStream:
+    """A stream-like object that writes to the log dialog"""
+    def __init__(self, dialog):
+        self.dialog = dialog
+
+    def write(self, text):
+        if text.strip():  # Only send non-empty lines
+            self.dialog.append_text(text)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+# --- Main Video View --- 
 class VideoView(QMainWindow):
     # Add signals for new shortcuts
     navigate_labeled_up = Signal()
@@ -17,6 +111,9 @@ class VideoView(QMainWindow):
         super().__init__()
         self.setWindowTitle("Video Labeling Tool")
         self.setMinimumSize(1200, 600)
+        
+        # Create the log dialog instance but don't show it yet
+        self.training_log_dialog = TrainingLogDialog(self)
         
         # Create the main widget and layout
         self.main_widget = QWidget()
@@ -126,6 +223,10 @@ class VideoView(QMainWindow):
         # Export Button
         self.export_button = QPushButton("Export Dataset")
         self.form_layout.addWidget(self.export_button)
+
+        # Train Button
+        self.train_button = QPushButton("Train Model")
+        self.form_layout.addWidget(self.train_button)
 
         # self.form_layout.addStretch() # Remove stretch to let list grow
         
@@ -317,3 +418,14 @@ class VideoView(QMainWindow):
     def get_labeled_frame_count(self):
         """Returns the number of items in the labeled frames list."""
         return self.labeled_frames_list.count() 
+    # --- Log Dialog Methods --- 
+    def show_log_dialog(self):
+        self.training_log_dialog.show()
+        self.training_log_dialog.raise_() # Bring to front
+        self.training_log_dialog.activateWindow()
+
+    def append_log_text(self, text):
+        self.training_log_dialog.append_text(text)
+        
+    def clear_log_dialog(self):
+        self.training_log_dialog.clear_text() 

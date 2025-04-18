@@ -20,7 +20,8 @@ def main():
     exit_code = app.exec()
     
     # Clean up resources
-    model.cleanup()
+    controller.cleanup()  # Clean up controller resources first
+    model.cleanup()      # Then clean up model resources
     
     return exit_code
 

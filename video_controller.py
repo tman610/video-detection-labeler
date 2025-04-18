@@ -1,11 +1,45 @@
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, QObject, Signal
 import time
 import os
 import random
 from collections import defaultdict
 from PIL import Image
 import yaml
+import threading
+from ultralytics import YOLO
+from ultralytics import settings
+import traceback
+import io
+import logging
+import contextlib
+import sys
+from multiprocessing import Process, Queue
+from training_process_entry import run_training_entry_point
 
+# --- Helper Class to Redirect Stdout/Stderr --- 
+class GUILogStream(QObject):
+    text_written = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # You might add buffering here if needed, but keep it simple first
+
+    def write(self, text):
+        # This method is called by print() or sys.stdout.write()
+        # Emit the signal to send the text to the main thread
+        self.text_written.emit(text)
+        return len(text) # write must return the number of bytes written
+
+    def flush(self):
+        # No-op needed for IOBase compatibility (though not strictly required now)
+        pass
+
+    # Add other methods needed to mimic a stream if libraries check for them
+    # (e.g., isatty() often needed)
+    def isatty(self):
+        return False
+
+# --- Video Controller --- 
 class VideoController:
     def __init__(self, model, view):
         self.model = model
@@ -13,6 +47,12 @@ class VideoController:
         self.timer = QTimer()
         self.timer.timeout.connect(self._on_timer_timeout)
         self.last_frame_time = 0
+        self.is_training = False # Flag to track training state
+        self.log_stream = None # Placeholder for the stream instance
+        self.training_process = None
+        self.log_queue = None
+        self.log_timer = QTimer()
+        self.log_timer.timeout.connect(self._process_log_queue)
         
         # --- Connect View Signals ---
         # Project/Class signals
@@ -30,6 +70,10 @@ class VideoController:
         
         # Export Button
         self.view.export_button.clicked.connect(self._export_dataset)
+        # Train Button
+        self.view.train_button.clicked.connect(self._start_training)
+        # Stop Button (now from log dialog)
+        self.view.training_log_dialog.stop_button.clicked.connect(self.stop_training)
 
         # Video control signals
         self.view.play_button.clicked.connect(self.toggle_playback)
@@ -143,17 +187,11 @@ class VideoController:
 
     def _on_frame_list_item_clicked(self, item):
         """Handle clicks on the labeled frames list"""
-        print("_on_frame_list_item_clicked triggered!") # DEBUG
         try:
             frame_number = item.data(Qt.UserRole) # Get frame number from item data
-            print(f"  Item data (frame number): {frame_number} (Type: {type(frame_number)})") # DEBUG
             
             if frame_number is not None and self.model.video_id is not None:
-                print(f"  Seeking to frame {frame_number}...") # DEBUG
                 self.model.seek(frame_number)
-                print(f"  Seek called for frame {frame_number}.") # DEBUG
-            else:
-                print(f"  Seek not called. Frame number: {frame_number}, Video ID: {self.model.video_id}") # DEBUG
         except Exception as e:
             print(f"  Error in _on_frame_list_item_clicked: {e}") # DEBUG
 
@@ -272,12 +310,9 @@ class VideoController:
         class_id = self.view.get_selected_class_id()
         if class_id is None or class_id == -1:
              self.view.show_error_message("Error", "Please select a class before drawing a rectangle.")
-             # Remove the temporary rectangle drawn by the view if needed
-             # self.view.video_display.clear_current_drawing_rect()
              return
         if self.model.video_id is None:
             self.view.show_error_message("Error", "Please open a video first.")
-            # self.view.video_display.clear_current_drawing_rect()
             return
             
         # Add the rectangle to the model (which also saves to DB)
@@ -345,7 +380,7 @@ class VideoController:
         print(f"  Found {len(labeled_frame_indices)} frames with labels.")
 
         # --- Prepare Directories --- 
-        base_export_dir = os.path.join("datasets", project_name)
+        base_export_dir = os.path.abspath(os.path.join("datasets", project_name))
         train_img_dir = os.path.join(base_export_dir, "train", "images")
         train_lbl_dir = os.path.join(base_export_dir, "train", "labels")
         valid_img_dir = os.path.join(base_export_dir, "valid", "images")
@@ -361,14 +396,15 @@ class VideoController:
              self.view.show_error_message("Export Error", f"Failed to create directories: {e}")
              return
 
-        # --- Create data.yaml --- 
+        # --- Create data.yaml (Using Absolute Path Base + Relative Train/Val) --- 
         yaml_path = os.path.join(base_export_dir, "data.yaml")
-        # Use relative paths from the YAML file location
+        # Define paths relative to the base_export_dir
         train_rel_path = os.path.join('train', 'images') 
         val_rel_path = os.path.join('valid', 'images')
         yaml_data = {
-            'train': train_rel_path.replace(os.sep, '/'), # Use forward slashes for consistency
-            'val': val_rel_path.replace(os.sep, '/'),   # Use forward slashes for consistency
+            'path': base_export_dir.replace(os.sep, '/'), # Absolute path to dataset root (use forward slashes)
+            'train': train_rel_path.replace(os.sep, '/'), # Path relative to 'path'
+            'val': val_rel_path.replace(os.sep, '/'),   # Path relative to 'path'
             'nc': len(class_names_ordered),
             'names': class_names_ordered,
             'tool-source': {
@@ -378,6 +414,7 @@ class VideoController:
         }
         try:
             print(f"  Attempting to write data.yaml to: {yaml_path}") # DEBUG
+            print(f"  YAML content: {yaml_data}") # DEBUG
             with open(yaml_path, 'w') as f:
                 yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
             print(f"  Successfully created data.yaml") # DEBUG
@@ -385,7 +422,7 @@ class VideoController:
             print(f"  ERROR writing data.yaml: {e}") # DEBUG
             self.view.show_error_message("Export Warning", f"Failed to write data.yaml: {e}")
             # Continue export even if YAML fails for now
-
+        
         # --- Split Data --- 
         random.shuffle(labeled_frame_indices)
         split_index = int(len(labeled_frame_indices) * 0.8)
@@ -469,3 +506,123 @@ class VideoController:
         
         print(message)
         self.view.show_info_message("Export Finished", message)
+
+    # --- Training --- 
+    def _start_training(self):
+        """Start the training process in a separate process."""
+        if self.is_training:
+            self.view.show_info_message("Training Info", "Training is already in progress.")
+            return
+
+        project_id = self.view.get_selected_project_id()
+        if project_id is None or project_id == -1:
+            self.view.show_error_message("Training Error", "Please select a project first.")
+            return
+            
+        project_name = self.model.db.get_project_name(project_id)
+        if not project_name:
+            self.view.show_error_message("Training Error", f"Could not find project name for ID {project_id}.")
+            return
+            
+        data_yaml_path = os.path.abspath(os.path.join('datasets', project_name, 'data.yaml'))
+        if not os.path.exists(data_yaml_path):
+            self.view.show_error_message(
+                "Training Error", 
+                f"Dataset file not found:\n{data_yaml_path}\n\nPlease export the dataset first."
+            )
+            return
+
+        # Prepare and show the log dialog
+        self.view.clear_log_dialog()
+        self.view.show_log_dialog()
+        self.view.training_log_dialog.stop_button.setEnabled(True)  # Enable stop button
+
+        # Create a queue for log messages
+        self.log_queue = Queue()
+        
+        # Start the training process
+        self.training_process = Process(
+            target=run_training_entry_point,
+            args=(data_yaml_path, project_name, self.log_queue)
+        )
+        self.training_process.start()
+        
+        # Start the log processing timer
+        self.log_timer.start(100)  # Check queue every 100ms
+        
+        # Update UI state
+        self.is_training = True
+        self.view.train_button.setEnabled(False)
+        self.view.train_button.setText("Training...")
+
+    def _process_log_queue(self):
+        """Process log messages from the training process."""
+        if not self.log_queue:
+            return
+
+        while not self.log_queue.empty():
+            try:
+                message = self.log_queue.get_nowait()
+                
+                if message.startswith("TRAINING_COMPLETE"):
+                    self._training_finished(True, "Training completed successfully")
+                elif message.startswith("TRAINING_ERROR:"):
+                    error_msg = message[len("TRAINING_ERROR:"):]
+                    self._training_finished(False, error_msg)
+                else:
+                    self.view.append_log_text(message)
+            except Exception as e:
+                print(f"Error processing log message: {e}")
+
+    def _training_finished(self, success, message):
+        """Handle training completion."""
+        self.is_training = False
+        self.view.train_button.setEnabled(True)
+        self.view.train_button.setText("Train Model")
+        self.view.training_log_dialog.stop_button.setEnabled(False)  # Disable stop button
+        
+        if self.training_process:
+            if self.training_process.is_alive():
+                self.training_process.terminate()
+                try:
+                    self.training_process.join(timeout=5.0)  # Wait up to 5 seconds for process to terminate
+                except Exception:
+                    pass  # Ignore any errors during join
+            self.training_process = None
+        
+        if self.log_queue:
+            self.log_queue.close()
+            self.log_queue = None
+        
+        self.log_timer.stop()
+        
+        if success:
+            self.view.show_info_message("Training Finished", message)
+        else:
+            self.view.show_error_message("Training Failed", message)
+
+    def stop_training(self):
+        """Stop the training process."""
+        if self.is_training and self.training_process:
+            self.training_process.terminate()
+            self._training_finished(False, "Training stopped by user")
+
+    def cleanup(self):
+        """Clean up resources when the application is closing."""
+        if self.is_training and self.training_process:
+            self.training_process.terminate()
+            try:
+                self.training_process.join(timeout=5.0)  # Wait up to 5 seconds for process to terminate
+            except Exception:
+                pass  # Ignore any errors during join
+            self.training_process = None
+        
+        if self.log_queue:
+            self.log_queue.close()
+            self.log_queue = None
+        
+        self.log_timer.stop()
+        
+        # Ensure log dialog is closed and logging is restored
+        if hasattr(self.view, 'training_log_dialog'):
+            self.view.training_log_dialog.close()
