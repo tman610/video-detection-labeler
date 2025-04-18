@@ -24,15 +24,28 @@ class VideoModel(QObject):
         self.frame_generator = None
         self.first_frame_pts = None
         self.frame_duration = None
+        self.project_id = None  # Added project ID
         self.video_id = None
         self.video_name = None
         self.db = Database()
         
         # Dictionary to store rectangles for each frame
-        self.rectangles = {}  # frame_index -> list of rectangles
+        self.rectangles = {}  # frame_index -> list of (class_id, x1, y1, x2, y2)
     
+    def set_project(self, project_id):
+        """Set the current project ID"""
+        self.project_id = project_id
+        # Potentially clear video/rectangles if project changes
+        self.cleanup()
+        print(f"Project set to: {self.project_id}")
+
     def load_video(self, file_path):
-        """Load a video file and initialize the model"""
+        """Load a video file and initialize the model for the current project"""
+        if self.project_id is None:
+            print("Error: Project not set. Please select a project first.")
+            # Optionally emit an error signal or raise an exception
+            return
+            
         try:
             self.container = av.open(file_path)
             self.stream = self.container.streams.video[0]
@@ -73,18 +86,18 @@ class VideoModel(QObject):
             fps = float(self.get_frame_rate())  # Ensure fps is float
             frame_count = int(self.frame_count)  # Ensure frame_count is int
             
-            # Store in database and get video ID
-            self.video_id = self.db.get_or_create_video(self.video_name, fps, frame_count)
-            print(f"Video ID: {self.video_id}")
+            # Use the current project_id
+            self.video_id = self.db.get_or_create_video(self.project_id, self.video_name, fps, frame_count)
+            if self.video_id is None:
+                raise Exception(f"Could not get or create video entry for {self.video_name} in project {self.project_id}")
+            print(f"Video ID: {self.video_id} (Project: {self.project_id})")
             
             self.current_frame_index = 0
             self.frame_count_changed.emit(self.frame_count)
             self.fps_changed.emit(fps)
             
-            # Clear rectangles for the new video
+            # Clear and load rectangles from the database for this video
             self.rectangles = {}
-            
-            # Load rectangles from the database for this video
             self._load_rectangles_from_db()
             
             # Get the first frame to store its PTS
@@ -109,32 +122,30 @@ class VideoModel(QObject):
             self.cleanup()
     
     def _load_rectangles_from_db(self):
-        """Load rectangles from the database for the current video"""
+        """Load rectangles (with class_id) from the database for the current video"""
         if self.video_id is None:
             return
             
         try:
-            # Get all rectangles for this video from the database
             db_rectangles = self.db.get_all_rectangles_for_video(self.video_id)
             
-            # Organize rectangles by frame index
+            # Organize rectangles by frame index: {frame_idx: [(class_id, x1, y1, x2, y2), ...]}
             for rect in db_rectangles:
-                frame_index = rect[1]  # frame_index is the second element
-                x1, y1, x2, y2 = rect[2:6]  # x1, y1, x2, y2 are elements 2-5
+                frame_index = rect['frame_index']
+                class_id = rect['class_id']
+                x1, y1, x2, y2 = rect['x1'], rect['y1'], rect['x2'], rect['y2']
                 
-                # Initialize the list for this frame if it doesn't exist
                 if frame_index not in self.rectangles:
                     self.rectangles[frame_index] = []
                 
-                # Add the rectangle to the list
-                self.rectangles[frame_index].append((x1, y1, x2, y2))
+                self.rectangles[frame_index].append((class_id, x1, y1, x2, y2))
             
             print(f"Loaded {len(db_rectangles)} rectangles from database for video {self.video_id}")
         except Exception as e:
             print(f"Error loading rectangles from database: {e}")
     
     def _load_frame(self):
-        """Load the current frame"""
+        """Load the current frame and emit its rectangles"""
         if self.container is None or self.frame_generator is None:
             return
             
@@ -142,8 +153,6 @@ class VideoModel(QObject):
             self.current_frame = next(self.frame_generator)
             self.frame_changed.emit(self.current_frame)
             self.current_frame_index_changed.emit(self.current_frame_index)
-            
-            # Emit rectangles for the current frame
             self._emit_rectangles_for_current_frame()
         except StopIteration:
             if self.is_playing:
@@ -152,38 +161,62 @@ class VideoModel(QObject):
             self.reset_to_start()
     
     def _emit_rectangles_for_current_frame(self):
-        """Emit rectangles for the current frame"""
-        rectangles = self.rectangles.get(self.current_frame_index, [])
-        self.rectangles_changed.emit(rectangles)
+        """Emit rectangles (with class_id) for the current frame"""
+        rects_data = self.rectangles.get(self.current_frame_index, [])
+        self.rectangles_changed.emit(rects_data) # Emit list of (class_id, x1, y1, x2, y2)
     
-    def add_rectangle(self, x1, y1, x2, y2):
-        """Add a rectangle to the current frame"""
-        # Create a new rectangle
-        rectangle = (x1, y1, x2, y2)
+    def add_rectangle(self, class_id, x1, y1, x2, y2):
+        """Add a rectangle with a class ID to the current frame"""
+        if self.video_id is None:
+            print("Error: Cannot add rectangle, no video loaded.")
+            return
+        if class_id is None:
+             print("Error: Cannot add rectangle, no class selected.")
+             return
+
+        # Create a new rectangle tuple
+        rectangle_data = (class_id, x1, y1, x2, y2)
         
+        frame_existed_before = self.current_frame_index in self.rectangles
+
         # Initialize the list for this frame if it doesn't exist
-        if self.current_frame_index not in self.rectangles:
+        if not frame_existed_before:
             self.rectangles[self.current_frame_index] = []
         
-        # Add the rectangle to the list
-        self.rectangles[self.current_frame_index].append(rectangle)
+        # Add the rectangle to the in-memory list
+        self.rectangles[self.current_frame_index].append(rectangle_data)
         
         # Save the rectangle to the database
-        if self.video_id is not None:
-            try:
-                self.db.save_rectangle(
-                    self.video_id,
-                    self.current_frame_index,
-                    x1, y1, x2, y2
-                )
-                print(f"Rectangle saved to database for video {self.video_id}, frame {self.current_frame_index}")
-            except Exception as e:
-                print(f"Error saving rectangle to database: {e}")
+        try:
+            success = self.db.save_rectangle(
+                self.video_id,
+                self.current_frame_index,
+                class_id,
+                x1, y1, x2, y2
+            )
+            if success:
+                print(f"Rectangle saved to DB: Video {self.video_id}, Frame {self.current_frame_index}, Class {class_id}")
+            else:
+                # If saving failed (e.g., duplicate), remove from memory list?
+                # For now, we keep it in memory but log the issue.
+                 print(f"Rectangle not saved to DB (likely duplicate): Video {self.video_id}, Frame {self.current_frame_index}, Class {class_id}")
+
+        except Exception as e:
+            print(f"Error saving rectangle to database: {e}")
         
-        # Emit the updated rectangles
+        # Emit the updated rectangles for the current frame
         self._emit_rectangles_for_current_frame()
         
-        print(f"Rectangle added to frame {self.current_frame_index}: {rectangle}")
+        # If this is the first rectangle for this frame, update the frame list
+        if not frame_existed_before:
+            # This could emit a signal, but for now, the controller will query
+            pass 
+
+        print(f"Rectangle added to frame {self.current_frame_index}: Class {class_id}, Coords ({x1},{y1})-({x2},{y2})")
+    
+    def get_frames_with_rectangles(self):
+        """Return a sorted list of frame indices that have rectangles"""
+        return sorted(list(self.rectangles.keys()))
     
     def reset_to_start(self):
         """Reset to the first frame"""
@@ -262,19 +295,21 @@ class VideoModel(QObject):
         """Clean up resources"""
         if self.container:
             self.container.close()
-            self.container = None
-            self.stream = None
-            self.current_frame = None
-            self.frame_generator = None
-            self.first_frame_pts = None
-            self.frame_duration = None
-            self.frame_count = 0
-            self.current_frame_index = 0
-            self.is_playing = False
-            self.video_id = None
-            self.video_name = None
-            self.rectangles = {}  # Clear rectangles
+        self.container = None
+        self.stream = None
+        self.current_frame = None
+        self.frame_generator = None
+        self.first_frame_pts = None
+        self.frame_duration = None
+        self.frame_count = 0
+        self.current_frame_index = 0
+        self.is_playing = False
+        # Don't reset project_id on cleanup unless intended
+        # self.project_id = None 
+        self.video_id = None
+        self.video_name = None
+        self.rectangles = {}  # Clear rectangles
         
-        # Close database connection
-        if self.db:
-            self.db.close() 
+        # Don't close DB connection here, manage it at application level
+        # if self.db:
+        #     self.db.close() 
