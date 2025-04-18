@@ -218,6 +218,59 @@ class VideoModel(QObject):
         """Return a sorted list of frame indices that have rectangles"""
         return sorted(list(self.rectangles.keys()))
     
+    def get_frame_by_index(self, frame_index):
+        """Retrieve and return a specific frame by index, returning the frame object (e.g., av.VideoFrame)"""
+        if self.container is None or self.first_frame_pts is None or self.stream is None:
+            print("Error: Cannot get frame, video not properly loaded.")
+            return None
+        if not (0 <= frame_index < self.frame_count):
+            print(f"Error: Frame index {frame_index} out of bounds (0-{self.frame_count-1})")
+            return None
+            
+        # Calculate target PTS
+        target_pts = self.first_frame_pts + (frame_index * self.frame_duration)
+        original_frame_index = self.current_frame_index # Store original position
+        
+        try:
+            # Seek to the nearest keyframe before our target
+            # Use 'any' direction for potentially faster seeking if needed, but backward is safer.
+            self.container.seek(target_pts, stream=self.stream, backward=True) 
+            
+            # Decode frames until we find the exact one or pass it
+            temp_frame_generator = self.container.decode(video=0)
+            found_frame_obj = None
+            while True:
+                try:
+                    frame = next(temp_frame_generator)
+                    # Using pts is more reliable than assuming decoded order matches index directly after seek
+                    if frame.pts >= target_pts: 
+                        # Check if it's the *exact* frame or the first one after the target PTS
+                        if frame.pts == target_pts or found_frame_obj is None:
+                             found_frame_obj = frame
+                        # If we already found a potential match and this one is later, break
+                        if frame.pts > target_pts and found_frame_obj is not None: 
+                           break 
+                except StopIteration:
+                    # Reached end of stream after seeking
+                    break 
+            
+            if found_frame_obj:
+                print(f"Retrieved frame for index {frame_index} (PTS: {found_frame_obj.pts})")
+                return found_frame_obj
+            else:
+                print(f"Warning: Could not find exact frame for index {frame_index} after seeking.")
+                return None
+
+        except Exception as e:
+            print(f"Error seeking/decoding frame {frame_index}: {e}")
+            return None
+        finally:
+            # IMPORTANT: Seek back to the original position to not disrupt playback state
+            # This is inefficient but necessary if we don't want get_frame_by_index to change the current frame
+            if self.current_frame_index != original_frame_index:
+                 print(f"Seeking back to original frame index {original_frame_index}")
+                 self.seek(original_frame_index)
+    
     def reset_to_start(self):
         """Reset to the first frame"""
         if self.container is None:

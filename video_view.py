@@ -123,6 +123,10 @@ class VideoView(QMainWindow):
         self.form_layout.addWidget(self.labeled_frames_label)
         self.form_layout.addWidget(self.labeled_frames_list)
 
+        # Export Button
+        self.export_button = QPushButton("Export Dataset")
+        self.form_layout.addWidget(self.export_button)
+
         # self.form_layout.addStretch() # Remove stretch to let list grow
         
         # Add the main panels to the main layout
@@ -291,6 +295,10 @@ class VideoView(QMainWindow):
     def show_error_message(self, title, message):
         """Display an error message box"""
         QMessageBox.critical(self, title, message)
+
+    def show_info_message(self, title, message):
+        """Display an informational message box"""
+        QMessageBox.information(self, title, message)
 
     # --- Methods to handle list navigation (called by Controller) ---
     def select_labeled_frame_item(self, row_index):

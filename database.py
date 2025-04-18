@@ -99,6 +99,19 @@ class Database:
             print(f"Database error getting projects: {e}")
             return []
 
+    def get_project_name(self, project_id):
+        """Get the name of a project by its ID"""
+        try:
+            self.cursor.execute("SELECT name FROM projects WHERE id = ?", (int(project_id),))
+            result = self.cursor.fetchone()
+            return result['name'] if result else None
+        except sqlite3.Error as e:
+            print(f"Database error getting project name: {e}")
+            return None
+        except (ValueError, TypeError) as e:
+            print(f"Data type error getting project name: {e}")
+            return None
+
     # --- Class Methods ---
     def create_class(self, project_id, name):
         """Create a new class for a project"""

@@ -1,5 +1,10 @@
 from PySide6.QtCore import QTimer, Qt
 import time
+import os
+import random
+from collections import defaultdict
+from PIL import Image
+import yaml
 
 class VideoController:
     def __init__(self, model, view):
@@ -23,6 +28,9 @@ class VideoController:
         self.view.navigate_labeled_up.connect(self._navigate_labeled_list_up)
         self.view.navigate_labeled_down.connect(self._navigate_labeled_list_down)
         
+        # Export Button
+        self.view.export_button.clicked.connect(self._export_dataset)
+
         # Video control signals
         self.view.play_button.clicked.connect(self.toggle_playback)
         self.view.prev_frame.clicked.connect(lambda: self.model.seek(self.model.current_frame_index - 1))
@@ -57,7 +65,6 @@ class VideoController:
         if projects:
             self._on_project_selected(0) # Trigger selection logic for the first item
         else:
-            self.view.populate_class_list([]) # Clear class list if no project
             self.view.populate_current_class_dropdown([]) # Clear class dropdown
             self.view.clear_labeled_frames_list() # Clear frames list
 
@@ -85,7 +92,6 @@ class VideoController:
         else:
             # Handle case where "No projects found" is selected or no project ID
             self.model.set_project(None)
-            self.view.populate_class_list([])
             self.view.populate_current_class_dropdown([])
             self.view.clear_labeled_frames_list() # Clear frames list
 
@@ -290,3 +296,176 @@ class VideoController:
          # Update the labeled frames list as rectangles might have changed
          # Optimization: Could check if the *set* of labeled frames actually changed
          # self._update_labeled_frames_list() # This is called after add_rectangle now 
+
+    # --- Export --- 
+    def _export_dataset(self):
+        """Exports labeled frames and YOLO annotations for the current video."""
+        project_id = self.view.get_selected_project_id()
+        video_id = self.model.video_id
+        video_name = self.model.video_name
+
+        # --- Initial Checks --- 
+        if project_id is None or project_id == -1:
+            self.view.show_error_message("Export Error", "Please select a project.")
+            return
+        if video_id is None:
+            self.view.show_error_message("Export Error", "Please open a video.")
+            return
+
+        project_name = self.model.db.get_project_name(project_id)
+        if not project_name:
+             self.view.show_error_message("Export Error", f"Could not find project name for ID {project_id}.")
+             return
+             
+        print(f"Starting export for Project: '{project_name}', Video: '{video_name}'")
+
+        # --- Get Class Info --- 
+        classes = self.model.db.get_classes_for_project(project_id)
+        if not classes:
+            self.view.show_error_message("Export Error", "No classes defined for this project.")
+            return
+        # Create map: DB class_id -> 0-based yolo_index
+        class_id_to_yolo_index = {row['id']: index for index, row in enumerate(classes)}
+        # Create ordered list of class names for YAML
+        class_names_ordered = [row['name'] for row in classes] # Ensure order matches yolo index
+        print(f"  Class mapping: {class_id_to_yolo_index}")
+        print(f"  Class names: {class_names_ordered}")
+
+        # --- Get Rectangle Data --- 
+        all_rectangles = self.model.db.get_all_rectangles_for_video(video_id)
+        if not all_rectangles:
+            self.view.show_error_message("Export Error", "No rectangles found for this video.")
+            return
+            
+        rects_by_frame = defaultdict(list)
+        for rect in all_rectangles:
+            rects_by_frame[rect['frame_index']].append(rect)
+            
+        labeled_frame_indices = sorted(list(rects_by_frame.keys()))
+        print(f"  Found {len(labeled_frame_indices)} frames with labels.")
+
+        # --- Prepare Directories --- 
+        base_export_dir = os.path.join("datasets", project_name)
+        train_img_dir = os.path.join(base_export_dir, "train", "images")
+        train_lbl_dir = os.path.join(base_export_dir, "train", "labels")
+        valid_img_dir = os.path.join(base_export_dir, "valid", "images")
+        valid_lbl_dir = os.path.join(base_export_dir, "valid", "labels")
+
+        try:
+            os.makedirs(train_img_dir, exist_ok=True)
+            os.makedirs(train_lbl_dir, exist_ok=True)
+            os.makedirs(valid_img_dir, exist_ok=True)
+            os.makedirs(valid_lbl_dir, exist_ok=True)
+            print(f"  Created directories under '{base_export_dir}'")
+        except OSError as e:
+             self.view.show_error_message("Export Error", f"Failed to create directories: {e}")
+             return
+
+        # --- Create data.yaml --- 
+        yaml_path = os.path.join(base_export_dir, "data.yaml")
+        # Use relative paths from the YAML file location
+        train_rel_path = os.path.join('train', 'images') 
+        val_rel_path = os.path.join('valid', 'images')
+        yaml_data = {
+            'train': train_rel_path.replace(os.sep, '/'), # Use forward slashes for consistency
+            'val': val_rel_path.replace(os.sep, '/'),   # Use forward slashes for consistency
+            'nc': len(class_names_ordered),
+            'names': class_names_ordered,
+            'tool-source': {
+                'name': 'tman610',
+                'url': 'https://github.com/tman610'
+            }
+        }
+        try:
+            print(f"  Attempting to write data.yaml to: {yaml_path}") # DEBUG
+            with open(yaml_path, 'w') as f:
+                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+            print(f"  Successfully created data.yaml") # DEBUG
+        except Exception as e:
+            print(f"  ERROR writing data.yaml: {e}") # DEBUG
+            self.view.show_error_message("Export Warning", f"Failed to write data.yaml: {e}")
+            # Continue export even if YAML fails for now
+
+        # --- Split Data --- 
+        random.shuffle(labeled_frame_indices)
+        split_index = int(len(labeled_frame_indices) * 0.8)
+        train_indices = labeled_frame_indices[:split_index]
+        valid_indices = labeled_frame_indices[split_index:]
+        print(f"  Splitting into {len(train_indices)} train, {len(valid_indices)} valid frames.")
+
+        # --- Process and Save Frames/Labels --- 
+        export_count = 0
+        error_count = 0
+        video_name_base = os.path.splitext(video_name)[0]
+
+        for frame_index in train_indices + valid_indices:
+            is_train = frame_index in train_indices
+            img_dir = train_img_dir if is_train else valid_img_dir
+            lbl_dir = train_lbl_dir if is_train else valid_lbl_dir
+            
+            av_frame = self.model.get_frame_by_index(frame_index)
+            if av_frame is None:
+                print(f"  ERROR: Could not retrieve frame {frame_index}. Skipping.")
+                error_count += 1
+                continue
+
+            try:
+                pil_image = av_frame.to_image()
+                img_width, img_height = pil_image.size
+                if img_width <= 0 or img_height <= 0:
+                    print(f"  ERROR: Invalid dimensions for frame {frame_index} ({img_width}x{img_height}). Skipping.")
+                    error_count += 1
+                    continue
+
+                img_filename = f"{video_name_base}_frame_{frame_index}.bmp"
+                img_path = os.path.join(img_dir, img_filename)
+                pil_image.save(img_path, "BMP")
+
+                yolo_lines = []
+                rectangles_for_this_frame = rects_by_frame[frame_index]
+                for rect in rectangles_for_this_frame:
+                    class_id = rect['class_id']
+                    x1, y1, x2, y2 = rect['x1'], rect['y1'], rect['x2'], rect['y2']
+                    
+                    if class_id not in class_id_to_yolo_index:
+                        print(f"  WARNING: Class ID {class_id} not found in project map for frame {frame_index}. Skipping this box.")
+                        continue
+                    yolo_class_index = class_id_to_yolo_index[class_id]
+                    
+                    box_width = x2 - x1
+                    box_height = y2 - y1
+                    center_x = x1 + box_width / 2
+                    center_y = y1 + box_height / 2
+                    
+                    norm_center_x = center_x / img_width
+                    norm_center_y = center_y / img_height
+                    norm_width = box_width / img_width
+                    norm_height = box_height / img_height
+                    
+                    norm_center_x = max(0.0, min(1.0, norm_center_x))
+                    norm_center_y = max(0.0, min(1.0, norm_center_y))
+                    norm_width = max(0.0, min(1.0, norm_width))
+                    norm_height = max(0.0, min(1.0, norm_height))
+
+                    yolo_lines.append(f"{yolo_class_index} {norm_center_x:.6f} {norm_center_y:.6f} {norm_width:.6f} {norm_height:.6f}")
+                
+                lbl_filename = f"{video_name_base}_frame_{frame_index}.txt"
+                lbl_path = os.path.join(lbl_dir, lbl_filename)
+                with open(lbl_path, 'w') as f:
+                    f.write("\n".join(yolo_lines))
+                
+                export_count += 1
+            except Exception as e:
+                print(f"  ERROR processing frame {frame_index}: {e}")
+                error_count += 1
+        
+        # --- Report Results --- 
+        message = f"Export complete for '{video_name}'.\n"
+        message += f"  Total labeled frames: {len(labeled_frame_indices)}\n"
+        message += f"  Successfully exported: {export_count}\n"
+        if error_count > 0:
+             message += f"  Errors encountered: {error_count}\n"
+        message += f"Dataset saved in: '{base_export_dir}'"
+        
+        print(message)
+        self.view.show_info_message("Export Finished", message)
